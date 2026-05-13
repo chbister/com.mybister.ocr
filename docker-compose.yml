@@ -1,0 +1,27 @@
+services:
+  ocr:
+    build: .
+    #container_name: ocr
+    expose:
+      - "3000"
+    volumes:
+      - ./_uploads:/app/temp
+    environment:
+      - NODE_ENV=production
+    restart: unless-stopped
+    networks:
+      - proxy-network
+  ocr-lb:
+    image: nginx:latest
+    expose:
+      - "3000"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf
+    depends_on:
+      - ocr
+    restart: unless-stopped
+    networks:
+      - proxy-network
+networks:
+  proxy-network:
+    external: true

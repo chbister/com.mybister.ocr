@@ -1,0 +1,82 @@
+import { execSync } from 'child_process';
+import fs from 'fs';
+import path from 'path';
+
+export function getRotation(filePath) {
+  console.log("[INFO] Checking PDF rotation...");
+  const output = execSync(`pdfinfo "${filePath}"`).toString();
+  const match = output.match(/Page rot:\s+(\d+)/);
+  const rotation = match ? parseInt(match[1], 10) : 0;
+  console.log(`[INFO] Detected rotation: ${rotation} degrees`);
+  return rotation;
+}
+
+export function rotatePDFIfNeeded(inputPath, outputPath) {
+  const rotation = getRotation(inputPath);
+  if (rotation !== 0) {
+    const correction = 360 - rotation;
+    console.log(`[INFO] Rotating PDF by ${correction} degrees...`);
+    execSync(`gs -o "${outputPath}" -sDEVICE=pdfwrite -dAutoRotatePages=/None -c "<</EndPage {0 eq {${correction} rotate} {}}>> setpagedevice" -f "${inputPath}"`);
+    console.log(`[INFO] Rotated PDF saved to: ${outputPath}`);
+    return outputPath;
+  } else {
+    console.log("[INFO] No rotation needed. Using original PDF.");
+    return inputPath;
+  }
+}
+
+export function convertFirstPageToImage(pdfPath, outputPrefix) {
+  console.log("[INFO] Extracting first page to PNG image...");
+  const imagePath = `${outputPrefix}-1.png`;
+  execSync(`pdftoppm -f 1 -l 1 -png "${pdfPath}" "${outputPrefix}"`);
+  console.log(`[INFO] Image created at: ${imagePath}`);
+  return imagePath;
+}
+
+export function extractFirstPageAsPDF(inputPath, outputPath) {
+  console.log("[INFO] Extracting first page as a separate PDF...");
+  execSync(`gs -sDEVICE=pdfwrite -dNOPAUSE -dBATCH -dSAFER -dFirstPage=1 -dLastPage=1 -sOutputFile="${outputPath}" "${inputPath}"`);
+  console.log(`[INFO] First-page-only PDF saved to: ${outputPath}`);
+}
+
+export function optimizePDF(inputPath, outputPath) {
+  console.log("[INFO] Optimizing PDF using Ghostscript...");
+  execSync(`gs -sDEVICE=pdfwrite -dCompatibilityLevel=1.4 -dPDFSETTINGS=/ebook -dNOPAUSE -dQUIET -dBATCH -sOutputFile="${outputPath}" "${inputPath}"`);
+  console.log(`[INFO] Optimized PDF saved to: ${outputPath}`);
+}
+
+export function runFullPDFOCR(inputPdfPath, outputBasePath) {
+  console.log("[INFO] Converting PDF to images (one per page)...");
+  const imagePrefix = `${outputBasePath}-page`;
+  execSync(`pdftoppm -png "${inputPdfPath}" "${imagePrefix}"`);
+  console.log("[INFO] Image conversion done.");
+
+  console.log("[INFO] Running Tesseract OCR on all pages...");
+
+  const dir = path.dirname(outputBasePath);
+  const prefix = path.basename(imagePrefix);
+  const files = fs.readdirSync(dir)
+    .filter(f => f.startsWith(prefix) && f.endsWith('.png'))
+    .map(f => path.join(dir, f));
+
+  if (files.length === 0) {
+    throw new Error("No images generated from PDF.");
+  }
+
+  const listFilePath = `${outputBasePath}-files.txt`;
+  fs.writeFileSync(listFilePath, files.join('\n'));
+
+  const ocrPdfPath = `${outputBasePath}.pdf`;
+  const ocrTxtPath = `${outputBasePath}.txt`;
+
+  execSync(`tesseract "${listFilePath}" "${outputBasePath}" pdf txt`);
+  const text = fs.readFileSync(ocrTxtPath, "utf8");
+
+  console.log(`[INFO] OCR text saved to: ${ocrTxtPath}`);
+  console.log(`[INFO] OCR PDF saved to: ${ocrPdfPath}`);
+
+  return {
+    pdf: ocrPdfPath,
+    text,
+  };
+}

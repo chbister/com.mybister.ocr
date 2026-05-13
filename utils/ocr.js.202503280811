@@ -1,0 +1,59 @@
+import { execSync } from 'child_process';
+import fs from 'fs';
+
+export function getRotation(filePath) {
+  console.log("[INFO] Checking PDF rotation...");
+  const output = execSync(`pdfinfo "${filePath}"`).toString();
+  const match = output.match(/Page rot:\s+(\d+)/);
+  const rotation = match ? parseInt(match[1], 10) : 0;
+  console.log(`[INFO] Detected rotation: ${rotation} degrees`);
+  return rotation;
+}
+
+export function rotatePDFIfNeeded(inputPath, outputPath) {
+  const rotation = getRotation(inputPath);
+  if (rotation !== 0) {
+    const correction = 360 - rotation;
+    console.log(`[INFO] Rotating PDF by ${correction} degrees...`);
+    execSync(`gs -o "${outputPath}" -sDEVICE=pdfwrite -dAutoRotatePages=/None -c "<</EndPage {0 eq {${correction} rotate} {}}>> setpagedevice" -f "${inputPath}"`);
+    console.log(`[INFO] Rotated PDF saved to: ${outputPath}`);
+    return outputPath;
+  } else {
+    console.log("[INFO] No rotation needed. Using original PDF.");
+    return inputPath;
+  }
+}
+
+export function convertFirstPageToImage(pdfPath, outputPrefix) {
+  console.log("[INFO] Extracting first page to PNG image...");
+  const imagePath = `${outputPrefix}-1.png`;
+  execSync(`pdftoppm -f 1 -l 1 -png "${pdfPath}" "${outputPrefix}"`);
+  console.log(`[INFO] Image created at: ${imagePath}`);
+  return imagePath;
+}
+
+export function runOCR(imagePath, outputTextPath) {
+  console.log("[INFO] Running Tesseract OCR...");
+  execSync(`tesseract "${imagePath}" "${outputTextPath}" pdf txt`);
+  const pdfPath = `${outputTextPath}.pdf`;
+  const txtPath = `${outputTextPath}.txt`;
+  const text = fs.readFileSync(txtPath, "utf8");
+  console.log(`[INFO] OCR text saved to: ${txtPath}`);
+  console.log(`[INFO] OCR PDF saved to: ${pdfPath}`);
+  return {
+    pdf: pdfPath,
+    text,
+  };
+}
+
+export function optimizePDF(inputPath, outputPath) {
+  console.log("[INFO] Optimizing PDF using Ghostscript...");
+  execSync(`gs -sDEVICE=pdfwrite -dCompatibilityLevel=1.4 -dPDFSETTINGS=/ebook -dNOPAUSE -dQUIET -dBATCH -sOutputFile="${outputPath}" "${inputPath}"`);
+  console.log(`[INFO] Optimized PDF saved to: ${outputPath}`);
+}
+
+export function extractFirstPageAsPDF(inputPath, outputPath) {
+  console.log("[INFO] Extracting first page as a separate PDF...");
+  execSync(`gs -sDEVICE=pdfwrite -dNOPAUSE -dBATCH -dSAFER -dFirstPage=1 -dLastPage=1 -sOutputFile="${outputPath}" "${inputPath}"`);
+  console.log(`[INFO] First-page-only PDF saved to: ${outputPath}`);
+}
