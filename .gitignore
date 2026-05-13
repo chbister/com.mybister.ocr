@@ -148,3 +148,5 @@ _uploads/**
 
 # Backups
 server.js.*
+utils/*.js.[0-9]*
+
