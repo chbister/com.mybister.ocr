@@ -22,8 +22,146 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 const app = express();
-const upload = multer({ dest: 'temp/' });
+const TEMP_DIR = path.join(__dirname, 'temp');
+fssync.mkdirSync(TEMP_DIR, { recursive: true });
+const upload = multer({ dest: TEMP_DIR });
 app.use(express.json());
+
+const TEMP_MAX_AGE_MS = Number(process.env.TEMP_MAX_AGE_HOURS ?? 24) * 60 * 60 * 1000;
+const CALLBACK_TIMEOUT_MS = Number(process.env.CALLBACK_TIMEOUT_MS ?? 30000);
+
+function isValidCallbackUrl(value) {
+  if (!value || typeof value !== 'string') return false;
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+async function getFormHeadersWithLength(form) {
+  const headers = form.getHeaders();
+  try {
+    // form-data v4: getLength ist callback-basiert, nicht Promise-basiert.
+    const length = await new Promise((resolve, reject) => {
+      form.getLength((err, len) => (err ? reject(err) : resolve(len)));
+    });
+    headers['Content-Length'] = length;
+  } catch (err) {
+    console.warn(`[WARN] Could not compute Content-Length, falling back to chunked: ${err.message}`);
+  }
+  return headers;
+}
+
+function describeCallbackError(error) {
+  if (error?.response) {
+    return `status ${error.response.status} from ${error.config?.url}`;
+  }
+  if (error?.request && !error?.response) {
+    return `no response from ${error.config?.url} (${error.code || error.message})`;
+  }
+  return error?.message || String(error);
+}
+
+async function postSuccessCallback(callbackUrl, { id, originalName, text, optimizedPath, firstPagePdfPath, imagePath }) {
+  const form = new FormData();
+  form.append('id', id);
+  form.append('text', text ?? '');
+  form.append('filename', originalName || `${id}.pdf`);
+  // knownLength mitgeben, damit form.getLength() eine Content-Length
+  // berechnen kann (ohne hängt der POST von Chunked-Encoding ab).
+  const [pdfStat, page1Stat, imgStat] = await Promise.all([
+    fs.stat(optimizedPath),
+    fs.stat(firstPagePdfPath),
+    fs.stat(imagePath),
+  ]);
+  form.append('pdf', fssync.createReadStream(optimizedPath), {
+    filename: `optimized-${id}.pdf`,
+    contentType: 'application/pdf',
+    knownLength: pdfStat.size,
+  });
+  form.append('pdf_page1', fssync.createReadStream(firstPagePdfPath), {
+    filename: `page1-${id}.pdf`,
+    contentType: 'application/pdf',
+    knownLength: page1Stat.size,
+  });
+  form.append('image', fssync.createReadStream(imagePath), {
+    filename: `page1-${id}.png`,
+    contentType: 'image/png',
+    knownLength: imgStat.size,
+  });
+
+  const headers = await getFormHeadersWithLength(form);
+  const response = await axios.post(callbackUrl, form, {
+    headers,
+    timeout: CALLBACK_TIMEOUT_MS,
+    maxBodyLength: Infinity,
+    maxContentLength: Infinity,
+  });
+  return response;
+}
+
+async function postErrorCallback(callbackUrl, payload) {
+  await axios.post(callbackUrl, payload, {
+    timeout: CALLBACK_TIMEOUT_MS,
+    maxBodyLength: Infinity,
+    maxContentLength: Infinity,
+  });
+}
+
+async function removeFilesQuietly(files) {
+  await Promise.allSettled(
+    (files || []).filter(Boolean).map(async (file) => {
+      try {
+        await fs.unlink(file);
+      } catch (err) {
+        if (err?.code !== 'ENOENT') console.warn(`[WARN] Cleanup failed for ${file}: ${err.message}`);
+      }
+    })
+  );
+}
+
+// Löscht alle Artefakte eines Jobs (alle Dateien mit id-Prefix) plus Extra-Dateien
+// (z.B. der Multer-Upload, dessen Name nicht mit der Job-ID beginnt).
+async function cleanupJobFiles(jobId, extraFiles = []) {
+  try {
+    const entries = await fs.readdir(TEMP_DIR);
+    const jobFiles = entries
+      .filter((name) => name.startsWith(jobId))
+      .map((name) => path.join(TEMP_DIR, name));
+    const files = [...jobFiles, ...extraFiles.filter(Boolean)];
+    if (files.length === 0) return;
+    console.log(`[INFO] Cleaning up ${files.length} temp file(s) for job ${jobId}...`);
+    await removeFilesQuietly(files);
+  } catch (err) {
+    console.warn(`[WARN] Job cleanup failed for ${jobId}: ${err.message}`);
+  }
+}
+
+// Entfernt verwaiste Dateien (z.B. nach Crash ohne finally-Cleanup) anhand des mtime-Alters.
+async function cleanupStaleTempFiles() {
+  try {
+    const entries = await fs.readdir(TEMP_DIR);
+    const now = Date.now();
+    const stale = [];
+    for (const name of entries) {
+      const full = path.join(TEMP_DIR, name);
+      try {
+        const stat = await fs.stat(full);
+        if (stat.isFile() && now - stat.mtimeMs > TEMP_MAX_AGE_MS) stale.push(full);
+      } catch {
+        // Datei zwischenzeitlich gelöscht → ignorieren
+      }
+    }
+    if (stale.length > 0) {
+      console.log(`[INFO] Removing ${stale.length} stale temp file(s)...`);
+      await removeFilesQuietly(stale);
+    }
+  } catch (err) {
+    console.warn(`[WARN] Stale temp cleanup failed: ${err.message}`);
+  }
+}
 
 app.get('/', (req, res) => {
   const hostname = os.hostname();
@@ -32,9 +170,12 @@ app.get('/', (req, res) => {
 });
 
 app.post('/ocr', upload.single('file'), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'No file uploaded' });
+  }
   const callbackUrl = req.body.callbackUrl;
   const id = uuidv4();
-  const tempDir = path.join(__dirname, 'temp');
+  const tempDir = TEMP_DIR;
   const originalPath = path.join(tempDir, req.file.filename);
   const rotatedPdfPath = path.join(tempDir, `${id}-rotated.pdf`);
   const imagePrefix = path.join(tempDir, id);
@@ -43,6 +184,11 @@ app.post('/ocr', upload.single('file'), async (req, res) => {
   console.log(`🚀 OCR microservice running on ${hostname}`);
   console.log('📩 Received OCR job:', req.file.originalname);
   res.status(202).json({ message: 'OCR started', id, hostname });
+
+  const hasCallback = isValidCallbackUrl(callbackUrl);
+  if (callbackUrl && !hasCallback) {
+    console.warn(`⚠️ Invalid callbackUrl ignored: ${callbackUrl}`);
+  }
 
   try {
     const correctedPdf = await rotatePDFIfNeeded(originalPath, rotatedPdfPath);
@@ -54,38 +200,55 @@ app.post('/ocr', upload.single('file'), async (req, res) => {
     const firstPagePdfPath = path.join(tempDir, `${id}-page1.pdf`);
     await extractFirstPageAsPDF(optimizedPath, firstPagePdfPath);
 
-    // ✅ Prepare multipart/form-data payload
-    const form = new FormData();
-    form.append('text', ocrResult.text);
-    form.append('filename', req.file.originalname || `${id}.pdf`);
-    form.append('pdf', fssync.createReadStream(optimizedPath));
-    form.append('pdf_page1', fssync.createReadStream(firstPagePdfPath));
-    form.append('image', fssync.createReadStream(imagePath));
+    console.log('✅ OCR processing complete');
 
-    if (callbackUrl) {
-      console.log('📤 Sending OCR result as multipart to callback:', callbackUrl);
-      await axios.post(callbackUrl, form, {
-        headers: form.getHeaders()
-      });
-    } else {
-      console.warn('⚠️ No callbackUrl provided — result not sent.');
+    // Erfolg und Zustellung getrennt behandeln: Ein fehlgeschlagener Callback
+    // darf nicht als OCR-Fehler gemeldet werden.
+    if (!hasCallback) {
+      console.warn('⚠️ No valid callbackUrl provided — result not sent.');
+      return;
     }
 
-    console.log('✅ OCR processing and callback complete');
+    try {
+      console.log('📤 Sending OCR result as multipart to callback:', callbackUrl);
+      const response = await postSuccessCallback(callbackUrl, {
+        id,
+        originalName: req.file.originalname,
+        text: ocrResult.text,
+        optimizedPath,
+        firstPagePdfPath,
+        imagePath,
+      });
+      console.log(`✅ Callback delivered (status ${response.status})`);
+    } catch (callbackError) {
+      // Kein zweiter POST an die gleiche defekte URL mit "OCR failed" —
+      // die OCR war erfolgreich, nur die Zustellung ist gescheitert.
+      console.error('[ERROR] Success callback failed:', describeCallbackError(callbackError));
+    }
   } catch (error) {
     console.error('[ERROR] OCR failed:', error.message);
-    if (callbackUrl) {
-      await axios.post(callbackUrl, {
-        error: 'OCR failed',
-        message: error.message,
-        filename: req.file.originalname || `${id}.pdf`
-      });
+    if (hasCallback) {
+      try {
+        await postErrorCallback(callbackUrl, {
+          id,
+          error: 'OCR failed',
+          message: error.message,
+          filename: req.file.originalname || `${id}.pdf`
+        });
+        console.log('📤 Error callback delivered');
+      } catch (callbackError) {
+        console.error('[ERROR] Error callback failed:', describeCallbackError(callbackError));
+      }
     }
+  } finally {
+    await cleanupJobFiles(id, [originalPath]);
   }
 });
 
-app.listen(3000, () => {
+app.listen(3000, async () => {
   console.log('🚀 OCR microservice listening on port 3000');
   const hostname = os.hostname();
   console.log(`🚀 OCR microservice running on ${hostname}`);
+  await cleanupStaleTempFiles();
+  setInterval(cleanupStaleTempFiles, 60 * 60 * 1000).unref();
 });
