@@ -1,95 +1,95 @@
 # com.mybister.ocr
 
-Asynchroner PDF-OCR-Microservice (Node.js + Express, Tesseract, Poppler, Ghostscript).
+Asynchronous PDF OCR microservice (Node.js + Express, Tesseract, Poppler, Ghostscript).
 
-Ein PDF wird per `POST /ocr` hochgeladen, im Hintergrund verarbeitet
-(Rotation korrigieren → Text prüfen → ggf. OCR → optimieren) und das
-Ergebnis als Multipart-POST an eine `callbackUrl` zugestellt.
+A PDF is uploaded via `POST /ocr`, processed in the background
+(fix rotation → check text → OCR if needed → optimize), and the result
+is delivered as a multipart POST to a `callbackUrl`.
 
-## Ablauf
+## Workflow
 
-1. `POST /ocr` mit Multipart-Feld `file` (PDF) und Feld `callbackUrl`.
-   Antwort sofort: `202 { message, id, hostname }`.
-2. Pipeline pro Job (`temp/`):
-   - Rotation per `pdfinfo` prüfen, ggf. per Ghostscript korrigieren
-   - Seite 1 als PNG-Vorschau rendern (`pdftoppm`)
-   - `smartPDFProcess`: enthält das PDF bereits ≥ 50 alphanumerische
-     Zeichen (`pdftotext`), wird die OCR übersprungen, sonst Voll-OCR
-     mit Tesseract (`deu+eng`) als durchsuchbares PDF + `.txt`
-   - PDF optimieren (`Ghostscript /ebook`), Seite 1 als eigenes PDF extrahieren
-3. Erfolgs-Callback als `multipart/form-data` an `callbackUrl`:
-   `id`, `text`, `filename`, `pdf` (optimiert), `pdf_page1`, `image` (PNG).
-   Schlägt nur die Zustellung fehl, wird das **nicht** als OCR-Fehler gemeldet.
-4. Bei OCR-Fehler: JSON-Callback `{ id, error: "OCR failed", message, filename }`.
-5. `temp/`-Cleanup läuft immer (`finally`): alle Job-Artefakte (`<id>*`)
-   plus Upload werden gelöscht; verwaiste Dateien älter als
-   `TEMP_MAX_AGE_HOURS` werden beim Start und stündlich entfernt.
+1. `POST /ocr` with multipart field `file` (PDF) and field `callbackUrl`.
+   Immediate response: `202 { message, id, hostname }`.
+2. Per-job pipeline (`temp/`):
+   - Check rotation via `pdfinfo`, correct it with Ghostscript if needed
+   - Render page 1 as PNG preview (`pdftoppm`)
+   - `smartPDFProcess`: if the PDF already contains ≥ 50 alphanumeric
+     characters (`pdftotext`), OCR is skipped; otherwise full OCR
+     with Tesseract (`deu+eng`) producing a searchable PDF + `.txt`
+   - Optimize the PDF (`Ghostscript /ebook`), extract page 1 as its own PDF
+3. Success callback as `multipart/form-data` to `callbackUrl`:
+   `id`, `text`, `filename`, `pdf` (optimized), `pdf_page1`, `image` (PNG).
+   If only the delivery fails, it is **not** reported as an OCR error.
+4. On OCR failure: JSON callback `{ id, error: "OCR failed", message, filename }`.
+5. `temp/` cleanup always runs (`finally`): all job artifacts (`<id>*`)
+   plus the upload are deleted; orphaned files older than
+   `TEMP_MAX_AGE_HOURS` are removed on startup and hourly.
 
 ## API
 
-| Methode | Pfad | Beschreibung |
-| ------- | ---- | ------------ |
-| `GET` | `/` | Healthcheck (`OCR microservice running on <host>`) |
-| `POST` | `/ocr` | Multipart-Upload: `file` (PDF, Pflicht), `callbackUrl` (http/https). Ohne Datei → `400`. Max. Body via Nginx: `48M`. |
+| Method | Path | Description |
+| ------ | ---- | ----------- |
+| `GET` | `/` | Health check (`OCR microservice running on <host>`) |
+| `POST` | `/ocr` | Multipart upload: `file` (PDF, required), `callbackUrl` (http/https). No file → `400`. Max body via nginx: `48M`. |
 
-Beispiel:
+Example:
 
 ```bash
 curl -X POST http://localhost:3000/ocr \
-  -F "file=@rechnung.pdf" \
-  -F "callbackUrl=https://mein-backend.example/ocr-callback"
+  -F "file=@invoice.pdf" \
+  -F "callbackUrl=https://my-backend.example/ocr-callback"
 # → {"message":"OCR started","id":"…","hostname":"…"}
 ```
 
-## Konfiguration (`.env`)
+## Configuration (`.env`)
 
-Siehe `.env.example`:
+See `.env.example`:
 
-| Variable | Default | Beschreibung |
-| -------- | ------- | ------------ |
-| `OCR_REPLICAS` | – | Anzahl OCR-Container bei `make up` (`--scale ocr=…`) |
-| `OCR_IMAGE` | `ghcr.io/chbister/com.mybister.ocr:latest` | Zu deployendes Image (z. B. `sha-<short>` pinnen) |
-| `TEMP_MAX_AGE_HOURS` | `24` | Alter, ab dem verwaiste `temp/`-Dateien gelöscht werden |
-| `CALLBACK_TIMEOUT_MS` | `30000` | Timeout für Callback-POSTs |
+| Variable | Default | Description |
+| -------- | ------- | ----------- |
+| `OCR_REPLICAS` | – | Number of OCR containers for `make up` (`--scale ocr=…`) |
+| `OCR_IMAGE` | `ghcr.io/chbister/com.mybister.ocr:latest` | Image to deploy (e.g. pin `sha-<short>`) |
+| `TEMP_MAX_AGE_HOURS` | `24` | Age after which orphaned `temp/` files are deleted |
+| `CALLBACK_TIMEOUT_MS` | `30000` | Timeout for callback POSTs |
 
-## Paket (GHCR)
+## Package (GHCR)
 
-Das Image wird automatisch gebaut und bereitgestellt:
+The image is built and published automatically:
 
 - Registry: `ghcr.io/chbister/com.mybister.ocr`
-- Trigger (`.github/workflows/docker-publish.yml`):
-  PR auf `main` = nur Build, Push auf `main` / Tags `v*.*.*` / manuell = Build + Push
-- Tags: `latest` (nur `main`), `main`, `sha-<short>`, Tag-Name bei Releases
+- Triggers (`.github/workflows/docker-publish.yml`):
+  PR to `main` = build only, push to `main` / tags `v*.*.*` / manual = build + push
+- Tags: `latest` (`main` only), `main`, `sha-<short>`, tag name for releases
 
 ```bash
 docker pull ghcr.io/chbister/com.mybister.ocr:latest
 OCR_IMAGE=ghcr.io/chbister/com.mybister.ocr:sha-a781e46 make up
 ```
 
-Hinweis: Das GHCR-Package steht default ggf. auf privat und muss
-einmalig auf **public** gestellt werden
-(Repo → Packages → `com.mybister.ocr` → Package settings → Change visibility).
+Note: the GHCR package defaults to private and must be switched to
+**public** once
+(repo → Packages → `com.mybister.ocr` → Package settings → Change visibility).
 
-## Betrieb
+## Operations
 
-Voraussetzungen: Docker + externes Netz `proxy-network`
-(`docker network create proxy-network`), Verzeichnis `_uploads/`
-wird nach `/app/temp` gemountet. Nginx (`ocr-lb`, `least_conn`)
-terminiert auf Port 3000 mit `client_max_body_size 48M`.
+Prerequisites: Docker + external network `proxy-network`
+(`docker network create proxy-network`); the `_uploads/` directory
+is mounted to `/app/temp`. Nginx (`ocr-lb`, `least_conn`)
+listens on port 3000 with `client_max_body_size 48M`.
 
 ```bash
-cp .env.example .env   # anpassen
-make up                # pullt Image, startet skaliert
-make pull              # nur Images ziehen
-make build             # lokal bauen
+cp .env.example .env   # adjust
+make up                # pulls image, starts scaled
+make pull              # pull images only
+make build             # build locally
 make down
 ```
 
-## Entwicklung
+## Development
 
-- `main` ist geschützt: keine Direkt-Pushes, Änderungen nur per
-  Feature-Branch → Pull Request → Merge; CI-Job `build` muss grün sein.
-- Lokal: `npm ci && npm start` (Node ≥ 20; Systemtools:
+- `main` is protected: no direct pushes, changes only via
+  feature branch → pull request → merge; the CI `build` job must be green.
+- Locally: `npm ci && npm start` (Node ≥ 20; system tools:
   `poppler-utils`, `tesseract-ocr` + `deu`/`eng`, `ghostscript`, `imagemagick`).
-- Quellcode: `server.js` (API, Callback, Cleanup),
-  `utils/ocr.js` (Rotation, Rendern, Smart-OCR, Optimierung).
+- Source: `server.js` (API, callback, cleanup),
+  `utils/ocr.js` (rotation, rendering, smart OCR, optimization).
