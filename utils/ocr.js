@@ -151,7 +151,8 @@ export async function runFullPDFOCR(inputPdfPath, outputBasePath) {
   const ocrPdfPath = `${outputBasePath}.pdf`;
   const ocrTxtPath = `${outputBasePath}.txt`;
 
-  await runCommand('tesseract', [listFilePath, outputBasePath, 'pdf', 'txt']);
+  //await runCommand('tesseract', [listFilePath, outputBasePath, 'pdf', 'txt']);
+  await runCommand('tesseract', [listFilePath, outputBasePath, '-l', 'deu+eng', 'pdf', 'txt']);
   const text = await fs.readFile(ocrTxtPath, 'utf8');
 
   console.log(`[INFO] OCR text saved to: ${ocrTxtPath}`);
