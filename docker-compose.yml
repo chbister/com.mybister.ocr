@@ -25,4 +25,7 @@ services:
       - proxy-network
 networks:
   proxy-network:
-    external: true
+    # Target systems join the existing shared network (default),
+    # local dev gets an auto-created project network instead:
+    # PROXY_NETWORK_EXTERNAL=false in .env
+    external: ${PROXY_NETWORK_EXTERNAL:-true}
