@@ -1,5 +1,6 @@
 services:
   ocr:
+    image: ${OCR_IMAGE:-ghcr.io/chbister/com.mybister.ocr:latest}
     build: .
     #container_name: ocr
     expose:
