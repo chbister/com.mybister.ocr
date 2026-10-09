@@ -17,6 +17,7 @@ import {
   optimizePDF,
   extractFirstPageAsPDF,
 } from './utils/ocr.js';
+import { logger } from './utils/logger.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -49,7 +50,7 @@ async function getFormHeadersWithLength(form) {
     });
     headers['Content-Length'] = length;
   } catch (err) {
-    console.warn(`[WARN] Could not compute Content-Length, falling back to chunked: ${err.message}`);
+    logger.warn(`Could not compute Content-Length, falling back to chunked: ${err.message}`);
   }
   return headers;
 }
@@ -116,7 +117,7 @@ async function removeFilesQuietly(files) {
       try {
         await fs.unlink(file);
       } catch (err) {
-        if (err?.code !== 'ENOENT') console.warn(`[WARN] Cleanup failed for ${file}: ${err.message}`);
+        if (err?.code !== 'ENOENT') logger.warn(`Cleanup failed for ${file}: ${err.message}`);
       }
     })
   );
@@ -132,10 +133,10 @@ async function cleanupJobFiles(jobId, extraFiles = []) {
       .map((name) => path.join(TEMP_DIR, name));
     const files = [...jobFiles, ...extraFiles.filter(Boolean)];
     if (files.length === 0) return;
-    console.log(`[INFO] Cleaning up ${files.length} temp file(s) for job ${jobId}...`);
+    logger.info(`Cleaning up ${files.length} temp file(s) for job ${jobId}...`);
     await removeFilesQuietly(files);
   } catch (err) {
-    console.warn(`[WARN] Job cleanup failed for ${jobId}: ${err.message}`);
+    logger.warn(`Job cleanup failed for ${jobId}: ${err.message}`);
   }
 }
 
@@ -155,17 +156,17 @@ async function cleanupStaleTempFiles() {
       }
     }
     if (stale.length > 0) {
-      console.log(`[INFO] Removing ${stale.length} stale temp file(s)...`);
+      logger.info(`Removing ${stale.length} stale temp file(s)...`);
       await removeFilesQuietly(stale);
     }
   } catch (err) {
-    console.warn(`[WARN] Stale temp cleanup failed: ${err.message}`);
+    logger.warn(`Stale temp cleanup failed: ${err.message}`);
   }
 }
 
 app.get('/', (req, res) => {
   const hostname = os.hostname();
-  console.log(`OCR microservice running on ${hostname}`);
+  logger.info(`OCR microservice running on ${hostname}`);
   res.send(`OCR microservice running on ${hostname}`);
 });
 
@@ -181,13 +182,13 @@ app.post('/ocr', upload.single('file'), async (req, res) => {
   const imagePrefix = path.join(tempDir, id);
 
   const hostname = os.hostname();
-  console.log(`🚀 OCR microservice running on ${hostname}`);
-  console.log('📩 Received OCR job:', req.file.originalname);
+  logger.info(`OCR microservice running on ${hostname}`);
+  logger.info('Received OCR job:', req.file.originalname);
   res.status(202).json({ message: 'OCR started', id, hostname });
 
   const hasCallback = isValidCallbackUrl(callbackUrl);
   if (callbackUrl && !hasCallback) {
-    console.warn(`⚠️ Invalid callbackUrl ignored: ${callbackUrl}`);
+    logger.warn(`Invalid callbackUrl ignored: ${callbackUrl}`);
   }
 
   try {
@@ -200,17 +201,17 @@ app.post('/ocr', upload.single('file'), async (req, res) => {
     const firstPagePdfPath = path.join(tempDir, `${id}-page1.pdf`);
     await extractFirstPageAsPDF(optimizedPath, firstPagePdfPath);
 
-    console.log('✅ OCR processing complete');
+    logger.info('OCR processing complete');
 
     // Erfolg und Zustellung getrennt behandeln: Ein fehlgeschlagener Callback
     // darf nicht als OCR-Fehler gemeldet werden.
     if (!hasCallback) {
-      console.warn('⚠️ No valid callbackUrl provided — result not sent.');
+      logger.warn('No valid callbackUrl provided — result not sent.');
       return;
     }
 
     try {
-      console.log('📤 Sending OCR result as multipart to callback:', callbackUrl);
+      logger.info('Sending OCR result as multipart to callback:', callbackUrl);
       const response = await postSuccessCallback(callbackUrl, {
         id,
         originalName: req.file.originalname,
@@ -219,14 +220,14 @@ app.post('/ocr', upload.single('file'), async (req, res) => {
         firstPagePdfPath,
         imagePath,
       });
-      console.log(`✅ Callback delivered (status ${response.status})`);
+      logger.info(`Callback delivered (status ${response.status})`);
     } catch (callbackError) {
       // Kein zweiter POST an die gleiche defekte URL mit "OCR failed" —
       // die OCR war erfolgreich, nur die Zustellung ist gescheitert.
-      console.error('[ERROR] Success callback failed:', describeCallbackError(callbackError));
+      logger.error('Success callback failed:', describeCallbackError(callbackError));
     }
   } catch (error) {
-    console.error('[ERROR] OCR failed:', error.message);
+    logger.error('OCR failed:', error.message);
     if (hasCallback) {
       try {
         await postErrorCallback(callbackUrl, {
@@ -235,9 +236,9 @@ app.post('/ocr', upload.single('file'), async (req, res) => {
           message: error.message,
           filename: req.file.originalname || `${id}.pdf`
         });
-        console.log('📤 Error callback delivered');
+        logger.info('Error callback delivered');
       } catch (callbackError) {
-        console.error('[ERROR] Error callback failed:', describeCallbackError(callbackError));
+        logger.error('Error callback failed:', describeCallbackError(callbackError));
       }
     }
   } finally {
@@ -246,9 +247,9 @@ app.post('/ocr', upload.single('file'), async (req, res) => {
 });
 
 app.listen(3000, async () => {
-  console.log('🚀 OCR microservice listening on port 3000');
+  logger.info('OCR microservice listening on port 3000');
   const hostname = os.hostname();
-  console.log(`🚀 OCR microservice running on ${hostname}`);
+  logger.info(`OCR microservice running on ${hostname}`);
   await cleanupStaleTempFiles();
   setInterval(cleanupStaleTempFiles, 60 * 60 * 1000).unref();
 });
