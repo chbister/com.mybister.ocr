@@ -1,7 +1,8 @@
 services:
   ocr:
     image: ${OCR_IMAGE:-ghcr.io/chbister/com.mybister.ocr:latest}
-    build: .
+    # Kein lokales `build:` — das Image kommt ausschließlich aus GHCR
+    # (CI baut auf jedem PR/-push). Lokal: `make build` (docker build direkt).
     #container_name: ocr
     expose:
       - "3000"
