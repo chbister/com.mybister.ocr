@@ -55,6 +55,22 @@ async function getFormHeadersWithLength(form) {
   return headers;
 }
 
+// Multer/busboy lesen den Dateinamen aus dem Content-Disposition-Header ohne
+// Charset-Angabe als latin1 ein (busboy-Default: defParamCharset fehlt). Ein vom
+// Client UTF-8-kodierter Name wie "Bestätigung (2).pdf" wird dadurch zu Mojibake
+// ("BestaÌtigung (2).pdf"). Wir dekodieren die Bytes byteexakt zurück und
+// normalisieren anschließend nach NFC (Umlaute kommen evtl. dekomponiert an).
+function repairFilename(value) {
+  let name = String(value ?? '');
+  for (let pass = 0; pass < 2 && /[\u0080-\u00FF]/.test(name); pass += 1) {
+    const decoded = Buffer.from(name, 'latin1').toString('utf8');
+    // U+FFFD heißt: die Bytes waren gar kein gültiges UTF-8 → lieber behalten.
+    if (decoded === name || decoded.includes('\uFFFD')) break;
+    name = decoded;
+  }
+  return name.normalize('NFC');
+}
+
 function describeCallbackError(error) {
   if (error?.response) {
     return `status ${error.response.status} from ${error.config?.url}`;
@@ -176,6 +192,7 @@ app.post('/ocr', upload.single('file'), async (req, res) => {
   }
   const callbackUrl = req.body.callbackUrl;
   const id = uuidv4();
+  const originalName = repairFilename(req.file.originalname);
   const tempDir = TEMP_DIR;
   const originalPath = path.join(tempDir, req.file.filename);
   const rotatedPdfPath = path.join(tempDir, `${id}-rotated.pdf`);
@@ -183,7 +200,7 @@ app.post('/ocr', upload.single('file'), async (req, res) => {
 
   const hostname = os.hostname();
   logger.info(`OCR microservice running on ${hostname}`);
-  logger.info('Received OCR job:', req.file.originalname);
+  logger.info('Received OCR job:', originalName);
   res.status(202).json({ message: 'OCR started', id, hostname });
 
   const hasCallback = isValidCallbackUrl(callbackUrl);
@@ -214,7 +231,7 @@ app.post('/ocr', upload.single('file'), async (req, res) => {
       logger.info('Sending OCR result as multipart to callback:', callbackUrl);
       const response = await postSuccessCallback(callbackUrl, {
         id,
-        originalName: req.file.originalname,
+        originalName,
         text: ocrResult.text,
         optimizedPath,
         firstPagePdfPath,
@@ -234,7 +251,7 @@ app.post('/ocr', upload.single('file'), async (req, res) => {
           id,
           error: 'OCR failed',
           message: error.message,
-          filename: req.file.originalname || `${id}.pdf`
+          filename: originalName || `${id}.pdf`
         });
         logger.info('Error callback delivered');
       } catch (callbackError) {
